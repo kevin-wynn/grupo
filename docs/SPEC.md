@@ -1,8 +1,21 @@
-# Self-Hosted Pages — Product Spec (v1)
+# Grupo — Product Spec (v1)
 
 A self-hostable static site deployment service inspired by Cloudflare Pages. Install on a Linux machine (e.g. Mac Mini), connect GitHub, configure domains, and serve multiple sites behind a Cloudflare Tunnel.
 
-**Design goal for v1:** one binary (or one `docker compose up`), minimal moving parts, no Kubernetes.
+**Design goal for v1:** one systemd-managed binary, minimal moving parts, no Kubernetes. Builds run in Docker containers; the Grupo service itself runs natively on the host.
+
+---
+
+## Decisions (locked in)
+
+| Decision | Choice |
+|---|---|
+| **Name** | `grupo` |
+| **Builds** | Each build runs in a Docker container (configurable image per project) |
+| **GitHub** | GitHub App — sign-in triggers installation; webhooks auto-configured on project create |
+| **Monorepos** | `root_dir` field on project (optional subpath within repo) |
+| **UI** | React + Tailwind (Vite), embedded in the Go binary at compile time |
+| **Install** | systemd binary (`/usr/local/bin/grupo`) — Docker required on host for builds |
 
 ---
 
@@ -26,18 +39,18 @@ Cloudflare Pages is convenient but couples hosting to Cloudflare. For a home lab
 | Multi-user RBAC | Single admin is enough for home lab |
 | Non-GitHub Git hosts | GitHub only in v1 |
 | Server-side rendering / SSR | Static files only |
-| Container-isolated builds | Optional in v1; subprocess + workdir first |
+| Docker Compose install for Grupo itself | systemd binary only; Docker used for builds |
 
 ---
 
 ## Target User Flow
 
-1. Install the service on Linux (systemd or Docker Compose).
+1. Install Docker and the Grupo binary on Linux (`install.sh` → systemd unit).
 2. Point a Cloudflare Tunnel at the service HTTP port (e.g. `:8080`).
-3. Open the admin UI, sign in with GitHub.
-4. Create a **project**: pick repo, branch, build command, output directory, and hostname.
-5. Register a GitHub webhook (manual paste URL in v1, or auto if using a GitHub App).
-6. Push to the configured branch → build runs → new files go live at the hostname.
+3. Open the admin UI, sign in with GitHub (install the Grupo GitHub App if prompted).
+4. Create a **project**: pick repo, branch, build image, build command, output directory, root dir (optional), and hostname.
+5. Grupo automatically registers a webhook on the repo via the GitHub App installation — no manual GitHub settings.
+6. Push to the configured branch → Docker build runs → new files go live at the hostname.
 7. Repeat for additional projects; each gets its own hostname on the same tunnel.
 
 ---
@@ -52,24 +65,28 @@ Cloudflare Pages is convenient but couples hosting to Cloudflare. For a home lab
                                          │
                     ┌────────────────────▼────────────────────┐
                     │              HTTP Router                  │
-                    │  Host: admin.yourdomain.com → Admin UI    │
+                    │  Host: admin.yourdomain.com → React UI    │
                     │  Host: app1.yourdomain.com  → Site A      │
                     │  Host: app2.yourdomain.com  → Site B      │
                     └─────────┬───────────────────┬───────────┘
                               │                   │
                     ┌─────────▼─────────┐ ┌───────▼──────────┐
                     │   Control Plane   │ │  Static File     │
-                    │   (API + UI)      │ │  Server          │
+                    │   (Go API + UI)   │ │  Server          │
                     └─────────┬─────────┘ └───────▲──────────┘
                               │                   │
                     ┌─────────▼─────────┐         │
                     │   Build Worker    │─────────┘
                     │   (queue + jobs)  │  writes to deploy dirs
                     └─────────┬─────────┘
+                              │ docker run
+                    ┌─────────▼─────────┐
+                    │   Build Container │  (ephemeral, per job)
+                    └─────────┬─────────┘
                               │
                     ┌─────────▼─────────┐
                     │   SQLite + FS     │
-                    │   /data/          │
+                    │   /var/lib/grupo/ │
                     └───────────────────┘
 ```
 
@@ -77,23 +94,46 @@ Cloudflare Pages is convenient but couples hosting to Cloudflare. For a home lab
 
 | Component | Responsibility |
 |---|---|
-| **Router** | Single HTTP listener; routes by `Host` header to admin UI or static site roots |
-| **Control plane** | REST API, web UI, GitHub OAuth, project CRUD, webhook ingestion |
-| **Build worker** | Clone repo, run build command, atomically swap deployment directory |
-| **Storage** | SQLite for metadata; filesystem for builds, logs, and published assets |
+| **Router** | Single HTTP listener; routes by `Host` header to embedded React UI or static site roots |
+| **Control plane** | REST API, GitHub App auth, project CRUD, webhook ingestion |
+| **Build worker** | Clone repo, run build in Docker container, atomically swap deployment directory |
+| **Storage** | SQLite for metadata; filesystem for clones, logs, and published assets |
 
-**Recommended stack (opinionated for simplicity):**
+### Stack
 
-- **Language:** Go — single static binary, good HTTP server, easy cross-compile
-- **Database:** SQLite (`modernc.org/sqlite` or `github.com/mattn/go-sqlite3`)
-- **UI:** Server-rendered HTML + minimal HTMX, or a small React/Vite SPA served from the binary
-- **Auth:** GitHub OAuth App (not GitHub App in v1 — fewer setup steps)
+| Layer | Choice |
+|---|---|
+| **Backend** | Go — single static binary, embeds frontend assets |
+| **Database** | SQLite (`modernc.org/sqlite`) |
+| **Frontend** | React + Vite + Tailwind CSS |
+| **Auth** | GitHub App (user-to-server OAuth + installation tokens) |
+| **Builds** | Docker Engine on host (`/var/run/docker.sock`) |
 
-Alternative: Python (FastAPI) + SQLite if the team prefers Python. The spec is stack-agnostic; Go is suggested for install simplicity.
+**Repo layout (planned):**
+
+```
+grupo/
+├── cmd/grupo/          # main entrypoint
+├── internal/           # api, router, build, github, db, config
+├── web/                # React + Tailwind (Vite)
+├── scripts/install.sh
+└── docs/SPEC.md
+```
 
 ---
 
 ## Data Model
+
+### `installations`
+
+Tracks GitHub App installations linked to the instance.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | int | GitHub installation ID (PK) |
+| `account_login` | string | User or org login |
+| `account_type` | string | `User` or `Organization` |
+| `created_at` | timestamp | |
 
 ### `projects`
 
@@ -101,15 +141,18 @@ Alternative: Python (FastAPI) + SQLite if the team prefers Python. The spec is s
 |---|---|---|
 | `id` | UUID | Primary key |
 | `name` | string | Display name |
+| `installation_id` | int | FK → `installations.id` |
 | `github_owner` | string | e.g. `octocat` |
 | `github_repo` | string | e.g. `my-site` |
 | `branch` | string | Trigger branch, e.g. `main` |
+| `build_image` | string | Docker image, e.g. `node:22-bookworm` |
 | `build_command` | string | e.g. `npm ci && npm run build` |
 | `output_dir` | string | Relative path inside repo, e.g. `dist` |
-| `root_dir` | string | Optional monorepo subpath |
+| `root_dir` | string | Optional monorepo subpath, e.g. `apps/web` |
 | `domain` | string | Unique hostname, e.g. `app1.example.com` |
+| `spa_fallback` | bool | Unknown paths → `index.html` |
 | `env_json` | JSON | Build-time env vars (optional v1) |
-| `webhook_secret` | string | HMAC secret for GitHub webhook |
+| `webhook_id` | int | GitHub hook ID (for cleanup on delete) |
 | `created_at` | timestamp | |
 | `updated_at` | timestamp | |
 
@@ -140,7 +183,7 @@ Alternative: Python (FastAPI) + SQLite if the team prefers Python. The spec is s
 ## Filesystem Layout
 
 ```
-/data/
+/var/lib/grupo/
 ├── db.sqlite
 ├── repos/                    # ephemeral clone workspaces
 │   └── {project_id}/
@@ -163,50 +206,84 @@ Single port (default `8080`). Route table loaded from SQLite on change (in-memor
 
 | Host | Handler |
 |---|---|
-| `ADMIN_DOMAIN` (config) | Admin UI + API |
-| `{project.domain}` | Serve files from `/data/sites/{project_id}/current` |
+| `ADMIN_DOMAIN` (config) | Embedded React SPA + `/api/*` |
+| `{project.domain}` | Serve files from `/var/lib/grupo/sites/{project_id}/current` |
 | Unknown host | 404 plain text |
 
-**Static serving behavior (match Cloudflare Pages basics):**
+**Static serving behavior:**
 
 - Try exact file path
 - Fall back to `index.html` for directories
-- SPA fallback (optional per-project flag): unknown paths → `index.html`
+- SPA fallback (per-project `spa_fallback` flag): unknown paths → `index.html`
+
+**Frontend routing:** React Router handles client-side routes under the admin domain. API lives at `/api/*`. Webhook at `/webhooks/github`.
 
 ---
 
-## GitHub Integration
+## GitHub App Integration
 
-### Authentication (Admin UI)
+Grupo uses a **GitHub App** (not a standalone OAuth App). One app registration per Grupo instance (or shared across instances — document both options).
 
-- GitHub OAuth App with scopes: `read:user`, `repo` (or `public_repo` if all repos are public)
-- Callback URL: `https://{ADMIN_DOMAIN}/auth/github/callback`
-- Session cookie (HttpOnly, Secure when behind tunnel)
+### App permissions (minimum)
 
-### Repo Selection
-
-- `GET /api/github/repos` — list repos for authenticated user (paginated)
-- Filter/search client-side or via `?q=`
-
-### Webhooks (v1 — manual-friendly)
-
-Two options; pick one for implementation:
-
-| Approach | Pros | Cons |
+| Permission | Access | Why |
 |---|---|---|
-| **A. Per-project webhook URL + secret** | Simple; no GitHub App | User adds webhook in repo settings |
-| **B. GitHub App** | Auto webhooks, org support | More setup for self-hosters |
+| Repository metadata | Read | Resolve repo info |
+| Contents | Read | Clone via HTTPS with installation token |
+| Webhooks | Read & write | Auto-create repo hooks on project create |
+| Administration | Read | List repos accessible to installation |
 
-**Recommendation for v1:** Approach A.
+### Subscribe to events
 
-- Webhook URL: `https://{ADMIN_DOMAIN}/webhooks/github/{project_id}`
-- Events: `push`
-- Verify `X-Hub-Signature-256` with project `webhook_secret`
-- On push to configured branch → enqueue build
+- `push` — trigger builds
+- `installation` / `installation_repositories` — track install/uninstall
+
+### Sign-in flow
+
+```
+User clicks "Sign in with GitHub"
+        │
+        ▼
+Redirect to GitHub App install/OAuth authorize
+        │
+        ├── Not installed → user selects account/orgs → Install
+        └── Already installed → authorize user
+        │
+        ▼
+Callback: exchange code for user token + store installation ID(s)
+        │
+        ▼
+Session cookie set → React dashboard
+```
+
+- User-to-server token for listing installations and repos the user can access.
+- Installation token (short-lived, refreshed per API call) for repo operations and webhook management.
+
+### Automatic webhooks
+
+When a project is created:
+
+1. Grupo calls `POST /repos/{owner}/{repo}/hooks` with the installation token.
+2. Payload URL: `https://{ADMIN_DOMAIN}/webhooks/github`
+3. Secret: app-level `GITHUB_WEBHOOK_SECRET` (same for all hooks).
+4. Events: `push`
+5. Store returned `webhook_id` on the project for cleanup on delete.
+
+When a project is deleted:
+
+- `DELETE /repos/{owner}/{repo}/hooks/{webhook_id}`
+
+### Webhook handler
+
+Single endpoint: `POST /webhooks/github`
+
+- Verify `X-Hub-Signature-256` with app webhook secret.
+- On `push`: match payload repo + branch against projects → enqueue build.
+- On `installation` events: upsert/remove rows in `installations`.
 
 ---
 
-## Build Pipeline
+## Build Pipeline (Docker)
 
 ```
 Webhook / manual trigger
@@ -217,22 +294,41 @@ Webhook / manual trigger
         ▼
   Worker picks job (single concurrent build in v1)
         │
-        ├── git clone --depth 1 --branch {branch} (or fetch + checkout)
-        ├── cd {root_dir} if set
-        ├── inject env vars
-        ├── run build_command in shell (bash -lc)
-        ├── verify output_dir exists and is non-empty
-        ├── rsync/cp to releases/{deployment_id}/
-        ├── atomic symlink swap
-        └── status: success | failed + log
+        ├── git clone --depth 1 --branch {branch}
+        │   (using installation token in clone URL)
+        ├── prepare workspace under /var/lib/grupo/repos/{project_id}
+        │
+        ├── docker run --rm
+        │     -v {workspace}:/src
+        │     -v {staging_out}:/out
+        │     -w /src/{root_dir}
+        │     -e ... (env_json)
+        │     {build_image}
+        │     bash -lc "{build_command} && cp -r {output_dir}/. /out/"
+        │
+        ├── verify /out is non-empty
+        ├── copy /out → sites/{project_id}/releases/{deployment_id}/
+        ├── atomic symlink swap on current
+        └── status: success | failed + log (stdout/stderr captured)
 ```
 
-**Build environment:**
+**Default build images (UI presets):**
 
-- v1: host OS toolchain (Node, etc. installed on the machine)
-- v1.1 (optional): Docker runner with configurable image per project
+| Preset | Image |
+|---|---|
+| Node.js 22 | `node:22-bookworm` |
+| Node.js 20 | `node:20-bookworm` |
+| Static (no build) | `alpine:3.20` |
 
-**Concurrency:** One build at a time globally in v1 to avoid CPU thrashing on a Mac Mini. Queue additional jobs.
+User can enter any public image (e.g. `golang:1.22`, `oven/bun:1`).
+
+**Docker requirements:**
+
+- Grupo systemd unit needs access to `/var/run/docker.sock`
+- Document minimum Docker version in README
+- Build containers run as `--rm` with no privileged flag
+
+**Concurrency:** One build at a time globally in v1 (queue additional jobs). Avoids CPU/RAM contention on a Mac Mini.
 
 **Manual redeploy:** `POST /api/projects/{id}/deploy` — rebuild latest commit on branch.
 
@@ -240,61 +336,96 @@ Webhook / manual trigger
 
 ## API (v1)
 
-All `/api/*` routes require session auth except webhooks.
+Session auth required on `/api/*`. Webhook uses GitHub signature auth.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/auth/github` | Start OAuth |
+| GET | `/auth/github` | Start GitHub App user OAuth |
 | GET | `/auth/github/callback` | OAuth callback |
 | POST | `/auth/logout` | End session |
-| GET | `/api/me` | Current user |
-| GET | `/api/github/repos` | List repos |
+| GET | `/api/me` | Current user + installations |
+| GET | `/api/github/repos` | List repos for installation (`?installation_id=`) |
 | GET | `/api/projects` | List projects |
-| POST | `/api/projects` | Create project |
+| POST | `/api/projects` | Create project (+ auto webhook) |
 | GET | `/api/projects/{id}` | Get project |
 | PATCH | `/api/projects/{id}` | Update project |
-| DELETE | `/api/projects/{id}` | Delete project + files |
+| DELETE | `/api/projects/{id}` | Delete project, webhook, and files |
 | POST | `/api/projects/{id}/deploy` | Trigger manual build |
 | GET | `/api/projects/{id}/deployments` | List deployments |
 | GET | `/api/deployments/{id}` | Deployment detail |
-| GET | `/api/deployments/{id}/logs` | Stream or return build log |
-| POST | `/webhooks/github/{project_id}` | GitHub push webhook |
+| GET | `/api/deployments/{id}/logs` | Return build log (text) |
+| POST | `/webhooks/github` | GitHub App webhook receiver |
+| GET | `/healthz` | Health check |
 
 ---
 
-## Admin UI (v1 screens)
+## Admin UI (React + Tailwind)
 
-1. **Login** — “Sign in with GitHub”
-2. **Dashboard** — list projects, last deploy status, domain link
-3. **New project wizard**
-   - Select repo (dropdown)
+Vite dev server proxies to Go API during development. Production build embedded via `go:embed`.
+
+### Screens
+
+1. **Login** — “Sign in with GitHub” (redirects to App install/authorize)
+2. **Dashboard** — project cards: name, domain, branch, last deploy status, link to live site
+3. **New project**
+   - Select installation (if user has multiple org installs)
+   - Select repo (searchable dropdown)
    - Branch (default `main`)
-   - Build command (default suggestions by framework detection — optional nice-to-have)
-   - Output directory (default `dist` or `public`)
+   - Build image (preset dropdown + custom input)
+   - Build command
+   - Output directory (default `dist`)
+   - Root directory (optional, for monorepos)
    - Domain hostname
-   - Show webhook URL + secret to paste in GitHub
-4. **Project detail** — edit settings, deployment history, log viewer, “Deploy now”
-5. **Settings** — admin domain, data directory (read-only display)
+   - SPA fallback toggle
+4. **Project detail**
+   - Edit settings
+   - Deployment history table
+   - Log viewer (monospace, scrollable)
+   - “Deploy now” button
+5. **Settings** — read-only instance info (admin domain, data dir, GitHub App status)
 
-Keep UI minimal: forms + tables, no design system required for v1.
+Keep v1 UI functional and clean with Tailwind — no component library required, but shadcn/ui is an optional upgrade later.
 
 ---
 
 ## Configuration
 
-Environment variables or `/etc/selfpages/config.yaml`:
+`/etc/grupo/config.yaml` (or environment variables):
 
 ```yaml
 listen_addr: ":8080"
-data_dir: "/var/lib/selfpages"
-admin_domain: "pages-admin.example.com"
+data_dir: "/var/lib/grupo"
+admin_domain: "grupo-admin.example.com"
 github:
-  client_id: "..."
-  client_secret: "..."
+  app_id: "123456"
+  client_id: "Iv1.xxxx"           # GitHub App client ID (OAuth)
+  client_secret: "..."            # GitHub App client secret
+  webhook_secret: "..."           # App webhook secret
+  private_key_path: "/etc/grupo/github-app.pem"
 session_secret: "random-32-bytes"
 ```
 
-Secrets should come from env vars in production, not committed to disk in plain text if avoidable.
+Environment variable overrides (for systemd `EnvironmentFile`):
+
+```
+GRUPO_LISTEN_ADDR=:8080
+GRUPO_DATA_DIR=/var/lib/grupo
+GRUPO_ADMIN_DOMAIN=grupo-admin.example.com
+GITHUB_APP_ID=123456
+GITHUB_CLIENT_ID=Iv1.xxxx
+GITHUB_CLIENT_SECRET=...
+GITHUB_WEBHOOK_SECRET=...
+GITHUB_PRIVATE_KEY_PATH=/etc/grupo/github-app.pem
+GRUPO_SESSION_SECRET=...
+```
+
+### GitHub App setup (one-time, documented in README)
+
+1. Create GitHub App at `github.com/settings/apps/new`
+2. Set callback URL: `https://{ADMIN_DOMAIN}/auth/github/callback`
+3. Set webhook URL: `https://{ADMIN_DOMAIN}/webhooks/github`
+4. Generate private key, download PEM to `/etc/grupo/github-app.pem`
+5. Paste app ID, client ID/secret, webhook secret into config
 
 ---
 
@@ -302,121 +433,130 @@ Secrets should come from env vars in production, not committed to disk in plain 
 
 Document in README; not built into the app.
 
-Example `config.yml` for `cloudflared`:
+**Recommended — wildcard ingress:**
 
 ```yaml
 tunnel: <tunnel-id>
 credentials-file: /path/to/credentials.json
 
 ingress:
-  - hostname: pages-admin.example.com
-    service: http://localhost:8080
-  - hostname: app1.example.com
-    service: http://localhost:8080
-  - hostname: app2.example.com
-    service: http://localhost:8080
-  - service: http_status:404
-```
-
-**Wildcard option:** If all hostnames share a pattern, a single wildcard ingress rule can forward `*.example.com` to `:8080` and let the app route by `Host` — simpler tunnel config.
-
-```yaml
-ingress:
   - hostname: "*.example.com"
     service: http://localhost:8080
   - service: http_status:404
 ```
 
+Grupo routes by `Host` internally — no per-site tunnel rules needed.
+
 ---
 
 ## Security Considerations (v1)
 
-- Validate GitHub webhook signatures
-- Session cookies: HttpOnly, SameSite=Lax
-- Build commands are user-defined — **trusted admin only**; document that this is arbitrary code execution on the host
-- Sanitize `domain` to prevent header injection (alphanumeric, dots, hyphens only)
-- Rate-limit webhook endpoint (basic)
-- Do not expose `/data` paths via HTTP
+- Validate GitHub webhook signatures (app secret)
+- Session cookies: HttpOnly, Secure, SameSite=Lax
+- Build commands run inside Docker containers — still arbitrary code; use trusted images and trusted admin only
+- Mount only the clone workspace and output dir into build containers — no Docker socket inside containers
+- Sanitize `domain` (alphanumeric, dots, hyphens only)
+- Rate-limit webhook endpoint
+- Do not expose `/var/lib/grupo` via HTTP
+- Installation tokens are short-lived and never sent to the frontend
 
 ---
 
-## Installation (v1)
+## Installation (systemd binary)
 
-**Option A — binary + systemd**
+**Prerequisites:** Linux, Docker Engine, systemd
 
 ```bash
-curl -fsSL .../install.sh | bash
-# installs binary to /usr/local/bin/selfpages
-# creates systemd unit
-# creates /var/lib/selfpages
+curl -fsSL https://.../install.sh | sudo bash
 ```
 
-**Option B — Docker Compose**
+The install script:
 
-```yaml
-services:
-  selfpages:
-    image: selfpages:latest
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./data:/data
-    environment:
-      - ADMIN_DOMAIN=pages-admin.example.com
-      - GITHUB_CLIENT_ID=...
-      - GITHUB_CLIENT_SECRET=...
-      - SESSION_SECRET=...
+1. Downloads `grupo` binary to `/usr/local/bin/grupo`
+2. Creates `/var/lib/grupo` and `/etc/grupo/`
+3. Installs systemd unit `grupo.service`
+4. Adds `grupo` user to `docker` group (or documents socket permissions)
+5. Enables and starts the service
+
+**systemd unit (sketch):**
+
+```ini
+[Unit]
+Description=Grupo static site host
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=grupo
+Group=grupo
+EnvironmentFile=/etc/grupo/env
+ExecStart=/usr/local/bin/grupo serve
+Restart=on-failure
+ReadWritePaths=/var/lib/grupo
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-Recommend shipping both; Docker for easy trials, binary for Mac Mini bare-metal.
+**Build from source:**
+
+```bash
+make build   # builds web/ → embed → go build
+sudo make install
+```
 
 ---
 
 ## Implementation Plan
 
-### Milestone 0 — Scaffold (1–2 days)
+### Milestone 0 — Scaffold
 
-- [ ] Repo structure, CI (lint + test)
-- [ ] Config loading, SQLite migrations
-- [ ] HTTP server skeleton with health check `GET /healthz`
+- [ ] Repo layout: `cmd/`, `internal/`, `web/`
+- [ ] Go module, config loading, SQLite migrations
+- [ ] HTTP server skeleton: `GET /healthz`
+- [ ] Vite + React + Tailwind scaffold in `web/`
+- [ ] Makefile: `make dev`, `make build` (embed frontend)
+- [ ] CI: lint, test, build
 
-### Milestone 1 — Routing + Static Serve (2–3 days)
+### Milestone 1 — Routing + Static Serve
 
 - [ ] Host-based router
-- [ ] Project CRUD in DB (API only, no auth yet)
+- [ ] Project CRUD API (no auth yet)
 - [ ] Serve static files from `sites/{id}/current`
 - [ ] SPA fallback flag
-- [ ] Seed/deploy test fixture site manually
+- [ ] Manual fixture deploy to verify routing
 
-### Milestone 2 — GitHub Auth + UI (2–3 days)
+### Milestone 2 — GitHub App Auth + React UI
 
-- [ ] OAuth flow + sessions
-- [ ] List GitHub repos
-- [ ] Minimal admin UI (dashboard + create project)
-- [ ] Protect API routes
+- [ ] GitHub App OAuth flow + sessions
+- [ ] Track installations in DB
+- [ ] List repos via installation token
+- [ ] React: login, dashboard, new project form
+- [ ] Protect `/api/*` routes
 
-### Milestone 3 — Build Worker (3–4 days)
+### Milestone 3 — Docker Build Worker
 
-- [ ] Deployment queue (in-process channel + single worker)
-- [ ] Git clone, run build, publish to releases/
-- [ ] Atomic symlink swap
-- [ ] Build logs to file + API
-- [ ] Manual “Deploy now”
+- [ ] Deployment queue (in-process, single worker)
+- [ ] Git clone with installation token
+- [ ] Docker build runner (mount workspace, capture logs)
+- [ ] Publish to `releases/`, atomic symlink swap
+- [ ] Build log API + log viewer in React
 
-### Milestone 4 — Webhooks (1–2 days)
+### Milestone 4 — Webhooks
 
-- [ ] Webhook endpoint + signature verification
+- [ ] App webhook endpoint + signature verification
+- [ ] Auto-create repo webhook on project create
+- [ ] Auto-delete webhook on project delete
 - [ ] Branch filter on push events
-- [ ] UI shows webhook URL + secret + setup instructions
+- [ ] Handle installation lifecycle events
 
-### Milestone 5 — Polish + Ship (2–3 days)
+### Milestone 5 — Ship
 
-- [ ] Install script + systemd unit
-- [ ] Docker Compose + Dockerfile
-- [ ] README: tunnel setup, GitHub OAuth app creation, first deploy walkthrough
-- [ ] Basic error handling and log viewer in UI
-
-**Total estimate:** ~2 weeks part-time for one developer.
+- [ ] `install.sh` + systemd unit
+- [ ] README: GitHub App creation, tunnel setup, first deploy walkthrough
+- [ ] Error states in UI (failed builds, missing installation)
+- [ ] Basic integration test with fixture repo + `alpine` build image
 
 ---
 
@@ -425,37 +565,38 @@ Recommend shipping both; Docker for easy trials, binary for Mac Mini bare-metal.
 | Layer | Approach |
 |---|---|
 | Unit | Router matching, webhook signature verification, config validation |
-| Integration | Build pipeline with a tiny fixture repo (HTML only, no-op build) |
-| E2E | Optional: spin up service, curl Host header, assert 200 |
+| Integration | Docker build with fixture repo (`alpine` + echo to `dist/`) |
+| Frontend | Vitest + React Testing Library for critical forms (optional v1) |
+| E2E | curl with `Host` header; simulated signed webhook POST |
 
-Fixture repo for CI:
+Fixture project for CI:
 
-```bash
-# build_command: "echo built > dist/index.html"
-# output_dir: dist
+```yaml
+build_image: alpine:3.20
+build_command: mkdir -p dist && echo hello > dist/index.html
+output_dir: dist
 ```
 
 ---
 
 ## Open Questions
 
-1. **Project name?** Working title: `selfpages` (change freely).
-2. **OAuth vs GitHub App for v1?** Spec recommends OAuth + manual webhooks.
-3. **Build isolation:** Accept host subprocess for v1, or require Docker from day one?
-4. **Monorepo support:** Is `root_dir` enough for v1?
-5. **Custom 404 pages:** Per-project `404.html` — include in v1 or defer?
+1. **Custom 404 pages** — per-project `404.html` support: defer to v2?
+2. **Shared vs per-instance GitHub App** — document creating your own app vs a published Grupo app?
+3. **Build concurrency** — stay at 1 global worker for v1, or allow N parallel?
 
 ---
 
 ## Success Criteria (v1 Done)
 
-- [ ] Install on Linux with one command
-- [ ] Sign in with GitHub
-- [ ] Create two projects with different domains
-- [ ] Push to branch → automatic build → site updates
-- [ ] Cloudflare Tunnel wildcard sends traffic to both sites correctly
-- [ ] Build logs visible in admin UI
+- [ ] Install on Linux via `install.sh` (systemd + Docker)
+- [ ] Sign in with GitHub; App installs without manual webhook setup
+- [ ] Create two projects with different domains and build images
+- [ ] Push to branch → Docker build → site updates
+- [ ] Cloudflare Tunnel wildcard routes both sites correctly
+- [ ] Build logs visible in React UI
 - [ ] Failed build does not take down previous successful deployment
+- [ ] Deleting a project removes its GitHub webhook
 
 ---
 
@@ -463,9 +604,9 @@ Fixture repo for CI:
 
 - Preview URLs per branch (`branch---project.example.com`)
 - Rollback to previous deployment
-- GitHub App for automatic webhook management
-- Docker-based build images per project
-- Environment variables UI + secrets encryption
-- Build concurrency limits per project
+- Environment variables UI + secrets encryption at rest
+- Build concurrency per project
+- Custom 404 / `_redirects` file support
 - Metrics (Prometheus)
 - Email/Slack notifications on deploy failure
+- shadcn/ui polish pass
