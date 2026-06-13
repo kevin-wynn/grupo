@@ -1,0 +1,16 @@
+[Unit]
+Description=Grupo static site host
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=grupo
+Group=grupo
+EnvironmentFile=/etc/grupo/env
+ExecStart=/usr/local/bin/grupo serve
+Restart=on-failure
+ReadWritePaths=/var/lib/grupo
+
+[Install]
+WantedBy=multi-user.target
