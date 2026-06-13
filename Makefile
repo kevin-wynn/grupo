@@ -55,7 +55,7 @@ webhook-test:
 clean:
 	rm -rf bin tmp $(WEB_DIR)/dist ./.data
 
-ci: setup test web-build build
+ci: setup web-build test build
 
 install: build
 	install -d /usr/local/bin /etc/grupo /var/lib/grupo
