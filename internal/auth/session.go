@@ -12,6 +12,10 @@ import (
 
 const SessionCookie = "grupo_session"
 
+func (m *Manager) CookieName() string {
+	return SessionCookie
+}
+
 type Manager struct {
 	store  *db.Store
 	secure bool

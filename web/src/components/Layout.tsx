@@ -1,13 +1,10 @@
 import { Link, Outlet } from 'react-router-dom'
+import { useAuth } from '../auth/AuthContext'
 import { api } from '../api'
-import { useEffect, useState } from 'react'
 
 export default function Layout() {
-  const [login, setLogin] = useState('')
-
-  useEffect(() => {
-    api.me().then(me => setLogin(me.github_login)).catch(() => setLogin(''))
-  }, [])
+  const { user, status } = useAuth()
+  const login = user?.github_login ?? (status?.skip_github_auth ? 'dev' : '')
 
   return (
     <div className="min-h-screen">
@@ -27,7 +24,7 @@ export default function Layout() {
             {login && <span>{login}</span>}
             <button
               className="rounded-md border border-slate-700 px-3 py-1 hover:border-slate-500"
-              onClick={() => api.logout().then(() => window.location.href = '/login')}
+              onClick={() => api.logout().then(() => { window.location.href = status?.skip_github_auth ? '/' : '/login' })}
             >
               Log out
             </button>

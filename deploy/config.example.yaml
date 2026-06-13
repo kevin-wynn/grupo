@@ -4,6 +4,7 @@ admin_domain: "admin.mygrupo.dev"
 session_secret: "change-me"
 github:
   app_id: ""
+  app_slug: ""
   client_id: ""
   client_secret: ""
   webhook_secret: ""

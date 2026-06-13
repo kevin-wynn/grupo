@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/kevin-wynn/grupo/internal/auth"
@@ -27,24 +24,28 @@ type Handler struct {
 	worker      *build.Worker
 	github      *gh.Client
 	sessions    *auth.Manager
+	oauthState  *auth.OAuthState
 	reload      func()
-	oauthStates sync.Map
 }
 
 func NewHandler(cfg *config.Config, store *db.Store, worker *build.Worker, ghClient *gh.Client, sessions *auth.Manager, reload func()) *Handler {
 	return &Handler{
-		cfg:      cfg,
-		store:    store,
-		worker:   worker,
-		github:   ghClient,
-		sessions: sessions,
-		reload:   reload,
+		cfg:        cfg,
+		store:      store,
+		worker:     worker,
+		github:     ghClient,
+		sessions:   sessions,
+		oauthState: auth.NewOAuthState(cfg.SessionSecret, !cfg.Dev),
+		reload:     reload,
 	}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", h.healthz)
+	mux.HandleFunc("GET /api/auth/status", h.authStatus)
 	mux.HandleFunc("GET /auth/github", h.authGitHub)
+	mux.HandleFunc("GET /auth/github/install", h.authGitHubInstall)
+	mux.HandleFunc("GET /auth/github/setup", h.authGitHubSetup)
 	mux.HandleFunc("GET /auth/github/callback", h.authCallback)
 	mux.HandleFunc("POST /auth/logout", h.authLogout)
 	mux.HandleFunc("POST /webhooks/github", h.webhookGitHub)
@@ -174,7 +175,7 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.cfg.SkipGitHubAuth && h.github != nil && p.FixturePath == "" {
-		webhookURL := fmt.Sprintf("https://%s/webhooks/github", h.cfg.AdminDomain)
+		webhookURL := h.webhookPublicURL(r)
 		hookID, err := h.github.CreateWebhook(r.Context(), p.InstallationID, p.GitHubOwner, p.GitHubRepo, webhookURL, h.cfg.GitHub.WebhookSecret)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
@@ -317,83 +318,10 @@ func (h *Handler) settings(w http.ResponseWriter, r *http.Request) {
 		"admin_domain":      h.cfg.AdminDomain,
 		"data_dir":          h.cfg.DataDir,
 		"github_configured": githubConfigured,
+		"github_app_slug":   h.cfg.GitHub.AppSlug,
 		"skip_github_auth":  h.cfg.SkipGitHubAuth,
 		"dev_mode":          h.cfg.Dev,
 	})
-}
-
-func (h *Handler) authGitHub(w http.ResponseWriter, r *http.Request) {
-	if h.github == nil {
-		writeError(w, http.StatusServiceUnavailable, "github not configured")
-		return
-	}
-	state, err := randomState()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	h.oauthStates.Store(state, time.Now())
-	redirectURL := fmt.Sprintf("https://%s/auth/github/callback", h.cfg.AdminDomain)
-	if h.cfg.Dev {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		redirectURL = fmt.Sprintf("%s://%s/auth/github/callback", scheme, r.Host)
-	}
-	cfg := h.github.OAuthConfig(redirectURL)
-	http.Redirect(w, r, cfg.AuthCodeURL(state), http.StatusFound)
-}
-
-func (h *Handler) authCallback(w http.ResponseWriter, r *http.Request) {
-	if h.github == nil {
-		writeError(w, http.StatusServiceUnavailable, "github not configured")
-		return
-	}
-	state := r.URL.Query().Get("state")
-	if _, ok := h.oauthStates.LoadAndDelete(state); !ok {
-		writeError(w, http.StatusBadRequest, "invalid oauth state")
-		return
-	}
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		writeError(w, http.StatusBadRequest, "missing code")
-		return
-	}
-	redirectURL := fmt.Sprintf("https://%s/auth/github/callback", h.cfg.AdminDomain)
-	if h.cfg.Dev {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		redirectURL = fmt.Sprintf("%s://%s/auth/github/callback", scheme, r.Host)
-	}
-	cfg := h.github.OAuthConfig(redirectURL)
-	token, err := cfg.Exchange(r.Context(), code)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	user, err := h.github.FetchOAuthUser(r.Context(), token)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	sessToken, err := h.sessions.CreateSession(r.Context(), user.ID, user.Login)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	h.sessions.SetCookie(w, sessToken)
-	http.Redirect(w, r, "/", http.StatusFound)
-}
-
-func (h *Handler) authLogout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(auth.SessionCookie); err == nil {
-		_ = h.store.DeleteSession(r.Context(), cookie.Value)
-	}
-	h.sessions.ClearCookie(w)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) webhookGitHub(w http.ResponseWriter, r *http.Request) {
@@ -454,7 +382,7 @@ func (h *Handler) handleInstallation(w http.ResponseWriter, r *http.Request, bod
 		return
 	}
 	switch evt.Action {
-	case "created":
+	case "created", "added":
 		_ = h.store.UpsertInstallation(r.Context(), db.Installation{
 			ID:           evt.Installation.ID,
 			AccountLogin: evt.Installation.Account.Login,
@@ -491,6 +419,9 @@ func (h *Handler) projectFromInput(in projectInput) (*db.Project, error) {
 	}
 	if in.EnvJSON == "" {
 		in.EnvJSON = "{}"
+	}
+	if !h.cfg.SkipGitHubAuth && in.FixturePath == "" && in.InstallationID <= 0 {
+		return nil, errors.New("installation_id is required")
 	}
 	return &db.Project{
 		Name:           in.Name,
@@ -530,14 +461,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-func randomState() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // SeedFixtureProject inserts the default fixture project if missing.

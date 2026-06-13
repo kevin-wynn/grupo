@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useAuth } from '../auth/AuthContext'
 import { api, type Installation, type Repo } from '../api'
 
 const imagePresets = [
@@ -10,6 +11,7 @@ const imagePresets = [
 
 export default function NewProject() {
   const navigate = useNavigate()
+  const { status } = useAuth()
   const [installations, setInstallations] = useState<Installation[]>([])
   const [repos, setRepos] = useState<Repo[]>([])
   const [error, setError] = useState('')
@@ -73,7 +75,24 @@ export default function NewProject() {
       <h1 className="text-2xl font-semibold text-white">New project</h1>
       <p className="mt-1 text-sm text-slate-400">Connect a GitHub repo and configure the build.</p>
 
+      <p className="mt-1 text-sm text-slate-400">Connect a GitHub repo and configure the build.</p>
+
+      {installations.length === 0 && !status?.skip_github_auth && (
+        <div className="mt-6 rounded-xl border border-amber-900/50 bg-amber-950/30 p-4 text-sm text-amber-100">
+          No GitHub App installations found.{' '}
+          <a href="/auth/github/install" className="font-medium text-white underline">
+            Install the Grupo GitHub App
+          </a>{' '}
+          on your account or organization, then sign in again.
+        </div>
+      )}
+
       <form onSubmit={submit} className="mt-8 space-y-5">
+        {installations.length === 1 && (
+          <p className="text-sm text-slate-400">
+            GitHub account: <span className="text-slate-200">{installations[0].account_login}</span>
+          </p>
+        )}
         {installations.length > 1 && (
           <Field label="Installation">
             <select
@@ -151,7 +170,7 @@ export default function NewProject() {
 
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || (installations.length === 0 && !status?.skip_github_auth)}
           className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
         >
           {loading ? 'Creating…' : 'Create project'}

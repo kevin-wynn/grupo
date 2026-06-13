@@ -12,6 +12,7 @@ import (
 
 type GitHubConfig struct {
 	AppID          string `yaml:"app_id"`
+	AppSlug        string `yaml:"app_slug"`
 	ClientID       string `yaml:"client_id"`
 	ClientSecret   string `yaml:"client_secret"`
 	WebhookSecret  string `yaml:"webhook_secret"`
@@ -79,6 +80,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("GITHUB_APP_ID"); v != "" {
 		cfg.GitHub.AppID = v
+	}
+	if v := os.Getenv("GITHUB_APP_SLUG"); v != "" {
+		cfg.GitHub.AppSlug = v
 	}
 	if v := os.Getenv("GITHUB_CLIENT_ID"); v != "" {
 		cfg.GitHub.ClientID = v

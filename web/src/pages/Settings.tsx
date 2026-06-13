@@ -23,6 +23,9 @@ export default function SettingsPage() {
         <Row label="Admin domain" value={settings.admin_domain} />
         <Row label="Data directory" value={settings.data_dir} mono />
         <Row label="GitHub App configured" value={settings.github_configured ? 'yes' : 'no'} />
+        {settings.github_app_slug && (
+          <Row label="GitHub App slug" value={settings.github_app_slug} />
+        )}
         <Row label="Skip GitHub auth" value={settings.skip_github_auth ? 'yes' : 'no'} />
         <Row label="Dev mode" value={settings.dev_mode ? 'yes' : 'no'} />
       </dl>

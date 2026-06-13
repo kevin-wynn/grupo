@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/oauth2"
 )
 
 type Client struct {
@@ -75,47 +74,6 @@ func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
 		return rsaKey, nil
 	}
 	return key, nil
-}
-
-func (c *Client) OAuthConfig(redirectURL string) *oauth2.Config {
-	return &oauth2.Config{
-		ClientID:     c.ClientID,
-		ClientSecret: c.ClientSecret,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  "https://github.com/login/oauth/authorize",
-			TokenURL: "https://github.com/login/oauth/access_token",
-		},
-		RedirectURL: redirectURL,
-		Scopes:      []string{"read:user"},
-	}
-}
-
-type OAuthUser struct {
-	ID    int64  `json:"id"`
-	Login string `json:"login"`
-}
-
-func (c *Client) FetchOAuthUser(ctx context.Context, token *oauth2.Token) (*OAuthUser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("github user: %s", string(body))
-	}
-	var user OAuthUser
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return nil, err
-	}
-	return &user, nil
 }
 
 func (c *Client) CreateAppJWT() (string, error) {

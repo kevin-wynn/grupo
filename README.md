@@ -84,12 +84,27 @@ Environment variables override file values (`GRUPO_*`, `GITHUB_*`).
 ## GitHub App setup
 
 1. Create a GitHub App at https://github.com/settings/apps/new
-2. Callback URL: `https://{ADMIN_DOMAIN}/auth/github/callback`
-3. Webhook URL: `https://{ADMIN_DOMAIN}/webhooks/github`
-4. Permissions: repo metadata (read), contents (read), webhooks (read/write), administration (read)
-5. Subscribe to `push`, `installation`, `installation_repositories`
-6. Generate a private key → save as `/etc/grupo/github-app.pem`
-7. Paste app ID, client ID/secret, and webhook secret into config
+2. **Callback URL:** `https://{ADMIN_DOMAIN}/auth/github/callback`
+3. **Setup URL:** `https://{ADMIN_DOMAIN}/auth/github/setup` (post-install redirect)
+4. **Webhook URL:** `https://{ADMIN_DOMAIN}/webhooks/github`
+5. Enable **Request user authorization (OAuth) during installation**
+6. Permissions: repo metadata (read), contents (read), webhooks (read/write), administration (read)
+7. Subscribe to `push`, `installation`, `installation_repositories`
+8. Generate a private key → save as `/etc/grupo/github-app.pem`
+9. Configure env vars (or `config.yaml`):
+
+| Variable | Description |
+|---|---|
+| `GITHUB_APP_ID` | App ID from GitHub |
+| `GITHUB_APP_SLUG` | URL slug (e.g. `grupo` from `github.com/apps/grupo`) |
+| `GITHUB_CLIENT_ID` | Client ID |
+| `GITHUB_CLIENT_SECRET` | Client secret |
+| `GITHUB_WEBHOOK_SECRET` | Webhook secret |
+| `GITHUB_PRIVATE_KEY_PATH` | Path to PEM file |
+
+For local dev with real GitHub auth, use a tunnel (ngrok) and set callback/webhook URLs to the tunnel host. Remove `GRUPO_SKIP_GITHUB_AUTH` from `.env.local`.
+
+**Sign-in flow:** users click **Sign in with GitHub** (OAuth) or **Install GitHub App** first. On successful login, Grupo syncs accessible installations via the GitHub API and stores them in SQLite.
 
 ---
 

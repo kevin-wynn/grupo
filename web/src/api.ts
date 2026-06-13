@@ -58,10 +58,19 @@ export type Me = {
   dev_mode?: boolean
 }
 
+export type AuthStatus = {
+  skip_github_auth: boolean
+  github_configured: boolean
+  github_app_slug: string
+  logged_in: boolean
+  dev_mode: boolean
+}
+
 export type Settings = {
   admin_domain: string
   data_dir: string
   github_configured: boolean
+  github_app_slug?: string
   skip_github_auth: boolean
   dev_mode: boolean
 }
@@ -73,6 +82,7 @@ export type Repo = {
 }
 
 export const api = {
+  authStatus: () => request<AuthStatus>('/api/auth/status'),
   me: () => request<Me>('/api/me'),
   settings: () => request<Settings>('/api/settings'),
   projects: () => request<Project[]>('/api/projects'),
