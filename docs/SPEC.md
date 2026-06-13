@@ -16,6 +16,16 @@ A self-hostable static site deployment service inspired by Cloudflare Pages. Ins
 | **Monorepos** | `root_dir` field on project (optional subpath within repo) |
 | **UI** | React + Tailwind (Vite), embedded in the Go binary at compile time |
 | **Install** | systemd binary (`/usr/local/bin/grupo`) — Docker required on host for builds |
+| **Domain** | `mygrupo.dev` — admin UI at `admin.mygrupo.dev`; deployed sites at subdomains (e.g. `app1.mygrupo.dev`) |
+
+### Domain layout (`mygrupo.dev`)
+
+| Hostname | Purpose |
+|---|---|
+| `admin.mygrupo.dev` | Grupo admin UI + API + GitHub webhooks |
+| `{project}.mygrupo.dev` | Deployed static sites (one subdomain per project) |
+
+Cloudflare Tunnel should use a single wildcard rule: `*.mygrupo.dev → localhost:8080`. Grupo routes traffic by the `Host` header.
 
 ---
 
@@ -60,14 +70,14 @@ Cloudflare Pages is convenient but couples hosting to Cloudflare. For a home lab
 ```
                     ┌─────────────────────────────────────────┐
                     │           Cloudflare Tunnel             │
-                    │   *.yourdomain.com → localhost:8080     │
+                    │   *.mygrupo.dev → localhost:8080        │
                     └────────────────────┬────────────────────┘
                                          │
                     ┌────────────────────▼────────────────────┐
                     │              HTTP Router                  │
-                    │  Host: admin.yourdomain.com → React UI    │
-                    │  Host: app1.yourdomain.com  → Site A      │
-                    │  Host: app2.yourdomain.com  → Site B      │
+                    │  Host: admin.mygrupo.dev  → React UI      │
+                    │  Host: app1.mygrupo.dev   → Site A        │
+                    │  Host: app2.mygrupo.dev   → Site B        │
                     └─────────┬───────────────────┬───────────┘
                               │                   │
                     ┌─────────▼─────────┐ ┌───────▼──────────┐
@@ -149,7 +159,7 @@ Tracks GitHub App installations linked to the instance.
 | `build_command` | string | e.g. `npm ci && npm run build` |
 | `output_dir` | string | Relative path inside repo, e.g. `dist` |
 | `root_dir` | string | Optional monorepo subpath, e.g. `apps/web` |
-| `domain` | string | Unique hostname, e.g. `app1.example.com` |
+| `domain` | string | Unique hostname, e.g. `app1.mygrupo.dev` |
 | `spa_fallback` | bool | Unknown paths → `index.html` |
 | `env_json` | JSON | Build-time env vars (optional v1) |
 | `webhook_id` | int | GitHub hook ID (for cleanup on delete) |
@@ -395,7 +405,7 @@ Keep v1 UI functional and clean with Tailwind — no component library required,
 ```yaml
 listen_addr: ":8080"
 data_dir: "/var/lib/grupo"
-admin_domain: "grupo-admin.example.com"
+admin_domain: "admin.mygrupo.dev"
 github:
   app_id: "123456"
   client_id: "Iv1.xxxx"           # GitHub App client ID (OAuth)
@@ -410,7 +420,7 @@ Environment variable overrides (for systemd `EnvironmentFile`):
 ```
 GRUPO_LISTEN_ADDR=:8080
 GRUPO_DATA_DIR=/var/lib/grupo
-GRUPO_ADMIN_DOMAIN=grupo-admin.example.com
+GRUPO_ADMIN_DOMAIN=admin.mygrupo.dev
 GITHUB_APP_ID=123456
 GITHUB_CLIENT_ID=Iv1.xxxx
 GITHUB_CLIENT_SECRET=...
@@ -440,12 +450,12 @@ tunnel: <tunnel-id>
 credentials-file: /path/to/credentials.json
 
 ingress:
-  - hostname: "*.example.com"
+  - hostname: "*.mygrupo.dev"
     service: http://localhost:8080
   - service: http_status:404
 ```
 
-Grupo routes by `Host` internally — no per-site tunnel rules needed.
+Grupo routes by `Host` internally — no per-site tunnel rules needed. All DNS for `*.mygrupo.dev` should point at the Cloudflare Tunnel.
 
 ---
 
@@ -602,7 +612,7 @@ output_dir: dist
 
 ## Future (v2+)
 
-- Preview URLs per branch (`branch---project.example.com`)
+- Preview URLs per branch (`branch---project.mygrupo.dev`)
 - Rollback to previous deployment
 - Environment variables UI + secrets encryption at rest
 - Build concurrency per project
