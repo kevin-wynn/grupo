@@ -2,7 +2,7 @@
 
 Self-hostable static site deployment for Linux.
 
-**Status:** Planning — see [docs/SPEC.md](docs/SPEC.md) for the v1 product spec and implementation plan.
+**Status:** Planning — see [docs/SPEC.md](docs/SPEC.md) for the v1 product spec and [docs/DEV.md](docs/DEV.md) for local development and testing.
 
 **Stack:** Go backend (systemd binary) · React + Tailwind UI · Docker builds · GitHub App
 

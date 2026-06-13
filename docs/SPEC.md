@@ -531,6 +531,8 @@ sudo make install
 - [ ] Makefile: `make dev`, `make build` (embed frontend)
 - [ ] CI: lint, test, build
 
+See [docs/DEV.md](DEV.md) for the local development environment, fixture-based fast loop, GitHub integration modes, and testing plan.
+
 ### Milestone 1 — Routing + Static Serve
 
 - [ ] Host-based router
